@@ -1,0 +1,68 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: flowforge
+      POSTGRES_USER: flowforge
+      POSTGRES_PASSWORD: flowforge_dev
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flowforge -d flowforge"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"
+
+
+  backend:
+    build: ./backend
+    environment: &backend_environment
+      DATABASE_URL: postgresql+psycopg://flowforge:flowforge_dev@db:5432/flowforge
+      REDIS_URL: redis://redis:6379/0
+      FRONTEND_ORIGIN: http://localhost:5173
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-15}
+    ports:
+      - "8001:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - ./backend:/app
+
+  worker:
+    build: ./backend
+    command: ["celery", "-A", "app.celery_app:celery_app", "worker", "--loglevel=info"]
+    environment: *backend_environment
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - ./backend:/app
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+
+volumes:
+  postgres_data:

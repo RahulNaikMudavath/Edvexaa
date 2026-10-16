@@ -50,6 +50,7 @@ function formatDate(value) {
 export default function App() {
   const [page, setPage] = useState("overview");
   const [integrations, setIntegrations] = useState([]);
+  const [selectedIntegration, setSelectedIntegration] = useState(null);
   const [workflows, setWorkflows] = useState([]);
   const [events, setEvents] = useState([]);
   const [health, setHealth] = useState("Checking");
@@ -305,22 +306,39 @@ export default function App() {
                 ) : (
                   <div className="divide-y divide-white/[0.07]">
                     {integrations.map((item) => (
-                      <div key={item.id} className="flex items-center justify-between gap-4 p-5">
+                      <button
+                        type="button"
+                        key={item.id}
+                        onClick={() => setSelectedIntegration(item)}
+                        className="flex w-full items-center justify-between gap-4 p-5 text-left transition hover:bg-white/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-400"
+                        aria-label={`View details for ${item.name}`}
+                      >
                         <div className="flex min-w-0 items-center gap-3">
                           <div className="grid h-10 w-10 shrink-0 place-items-center rounded-lg bg-cyan-400/10 text-cyan-300">
                             <Webhook size={19} />
                           </div>
+
                           <div className="min-w-0">
                             <p className="truncate text-sm font-medium">{item.name}</p>
                             <p className="mt-1 truncate text-xs text-slate-500">
-                              {item.provider} · {item.event_types.join(", ") || "No event types"}
+                              {item.provider} · {item.event_types?.join(", ") || "No event types"}
                             </p>
                           </div>
                         </div>
-                        <span className="rounded-full bg-emerald-400/10 px-2.5 py-1 text-xs text-emerald-300">
-                          Active
-                        </span>
-                      </div>
+
+                        <div className="flex shrink-0 items-center gap-3">
+                          <span
+                            className={`rounded-full px-2.5 py-1 text-xs ${
+                              item.is_active
+                                ? "bg-emerald-400/10 text-emerald-300"
+                                : "bg-slate-400/10 text-slate-300"
+                            }`}
+                          >
+                            {item.is_active ? "Active" : "Inactive"}
+                          </span>
+                          <ArrowUpRight size={16} className="text-slate-500" />
+                        </div>
+                      </button>
                     ))}
                   </div>
                 )}
@@ -418,6 +436,99 @@ export default function App() {
           </section>
         )}
       </main>
+
+      {selectedIntegration && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setSelectedIntegration(null);
+            }
+          }}
+        >
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="integration-detail-title"
+            className="w-full max-w-lg rounded-2xl border border-white/10 bg-[#0c1222] p-6 shadow-2xl"
+          >
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-xs uppercase tracking-widest text-violet-300">
+                  Integration details
+                </p>
+                <h2
+                  id="integration-detail-title"
+                  className="mt-2 text-xl font-semibold"
+                >
+                  {selectedIntegration.name}
+                </h2>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setSelectedIntegration(null)}
+                className="rounded-lg border border-white/10 px-3 py-2 text-sm text-slate-300 hover:bg-white/5"
+                aria-label="Close integration details"
+              >
+                Close
+              </button>
+            </div>
+
+            <dl className="mt-6 space-y-4 text-sm">
+              <div>
+                <dt className="text-slate-500">Integration ID</dt>
+                <dd className="mt-1 break-all font-mono text-xs text-slate-200">
+                  {selectedIntegration.id}
+                </dd>
+              </div>
+
+              <div>
+                <dt className="text-slate-500">Provider</dt>
+                <dd className="mt-1 text-slate-200">
+                  {selectedIntegration.provider}
+                </dd>
+              </div>
+
+              <div>
+                <dt className="text-slate-500">Supported event types</dt>
+                <dd className="mt-2 flex flex-wrap gap-2">
+                  {(selectedIntegration.event_types || []).map((eventType) => (
+                    <span
+                      key={eventType}
+                      className="rounded-full border border-violet-400/20 bg-violet-400/10 px-3 py-1 text-xs text-violet-200"
+                    >
+                      {eventType}
+                    </span>
+                  ))}
+                  {(!selectedIntegration.event_types ||
+                    selectedIntegration.event_types.length === 0) && (
+                    <span className="text-slate-400">No event types configured</span>
+                  )}
+                </dd>
+              </div>
+
+              <div>
+                <dt className="text-slate-500">Status</dt>
+                <dd className="mt-1 text-slate-200">
+                  {selectedIntegration.is_active ? "Active" : "Inactive"}
+                </dd>
+              </div>
+
+              <div>
+                <dt className="text-slate-500">Created at</dt>
+                <dd className="mt-1 text-slate-200">
+                  {formatDate(selectedIntegration.created_at)}
+                </dd>
+              </div>
+            </dl>
+
+            <p className="mt-6 rounded-lg border border-amber-400/20 bg-amber-400/5 p-3 text-xs leading-5 text-amber-200">
+              Webhook secrets are not displayed in this details panel.
+            </p>
+          </section>
+        </div>
+      )}
     </div>
   );
 }

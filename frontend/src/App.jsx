@@ -739,6 +739,19 @@ function FailureAnalysis({ analysis }) {
         </p>
       ) : (
         <div className="mt-4 space-y-4 text-xs leading-5">
+          <div>
+            <span
+              className={`inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-medium ${
+                analysis.analysis_source === "rule_based"
+                  ? "bg-amber-400/10 text-amber-200 ring-1 ring-amber-400/20"
+                  : "bg-violet-400/10 text-violet-200 ring-1 ring-violet-400/20"
+              }`}
+            >
+              {analysis.analysis_source === "rule_based"
+                ? "Rule-based fallback"
+                : "AI-generated"}
+            </span>
+          </div>
           <AnalysisValue
             label="Summary"
             value={analysis.summary}

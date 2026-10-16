@@ -403,7 +403,9 @@ def test_failure_analysis_is_persisted_and_duplicate_delivery_does_not_call_prov
     assert detail.json()["failure_analysis"]["summary"] == expected["summary"]
 
 
-def test_invalid_analysis_output_is_persisted_as_failed(session_factory, monkeypatch):
+def test_invalid_analysis_output_uses_rule_based_fallback(
+    session_factory, monkeypatch
+):
     execution_id = create_execution(session_factory)
     mark_execution_failed(session_factory, execution_id)
 
@@ -411,54 +413,67 @@ def test_invalid_analysis_output_is_persisted_as_failed(session_factory, monkeyp
         return validate_analysis_response('{"confidence": 1.4}')
 
     monkeypatch.setattr(tasks, "request_failure_analysis", invalid_provider)
-
     result = analysis_task_result(execution_id)
-
-    assert result["analysis_status"] == "Failed"
+    assert result["analysis_status"] == "Completed"
     with session_factory() as db:
-        analysis = db.scalar(select(ExecutionAnalysis))
-        assert analysis.status == "Failed"
+        execution = db.get(Execution, execution_id)
+        analysis = execution.failure_analysis
+        assert execution.status == "Failed"
+        assert analysis.status == "Completed"
+        assert analysis.summary is not None
+        assert "Rule-based" in analysis.summary
+        assert analysis.likely_cause
+        assert analysis.suggested_remediation
+        assert analysis.confidence == 0.5
         assert "exactly the required fields" in analysis.error_message
-        assert analysis.confidence is None
-        assert db.get(Execution, execution_id).status == "Failed"
 
 
-def test_provider_error_is_persisted_without_touching_execution(session_factory, monkeypatch):
+def test_provider_error_uses_fallback_without_touching_execution(
+    session_factory, monkeypatch
+):
     execution_id = create_execution(session_factory)
     mark_execution_failed(session_factory, execution_id)
     monkeypatch.setattr(
         tasks,
         "request_failure_analysis",
-        lambda context: (_ for _ in ()).throw(AnalysisProviderError("Provider unavailable.")),
+        lambda context: (_ for _ in ()).throw(
+            AnalysisProviderError("Provider unavailable.")
+        ),
     )
-
-    assert analysis_task_result(execution_id)["analysis_status"] == "Failed"
+    result = analysis_task_result(execution_id)
+    assert result["analysis_status"] == "Completed"
     with session_factory() as db:
         execution = db.get(Execution, execution_id)
         analysis = execution.failure_analysis
-        assert analysis.error_message == "Provider unavailable."
         assert execution.status == "Failed"
         assert execution.attempt_count == 0
         assert [entry.message for entry in execution.logs] == [
             "PermanentExecutionError: unsupported action"
         ]
+        assert analysis.status == "Completed"
+        assert "Rule-based" in analysis.summary
+        assert "Provider unavailable." in analysis.error_message
 
 
-def test_missing_provider_configuration_marks_analysis_unavailable(
+def test_missing_provider_configuration_uses_rule_based_fallback(
     session_factory, monkeypatch
 ):
     execution_id = create_execution(session_factory)
     mark_execution_failed(session_factory, execution_id)
     for name in ("LLM_API_KEY", "LLM_MODEL", "LLM_BASE_URL"):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(tasks, "request_failure_analysis", request_failure_analysis)
-
-    assert analysis_task_result(execution_id)["analysis_status"] == "Unavailable"
+    monkeypatch.setattr(
+        tasks, "request_failure_analysis", request_failure_analysis
+    )
+    result = analysis_task_result(execution_id)
+    assert result["analysis_status"] == "Completed"
     with session_factory() as db:
         analysis = db.scalar(select(ExecutionAnalysis))
-        assert analysis.status == "Unavailable"
+        assert analysis.status == "Completed"
+        assert "Rule-based" in analysis.summary
         assert "LLM_API_KEY" in analysis.error_message
-        assert analysis.summary is None
+        assert analysis.likely_cause
+        assert analysis.suggested_remediation
 
 
 def test_analysis_output_validation_requires_complete_fields_and_bounded_confidence():

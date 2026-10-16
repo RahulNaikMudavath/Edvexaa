@@ -14,6 +14,7 @@ from .failure_analysis import (
     AnalysisProviderError,
     AnalysisUnavailableError,
     InvalidAnalysisResponse,
+    build_rule_based_analysis,
     request_failure_analysis,
 )
 from .models import Execution, ExecutionAnalysis, ExecutionLog, utcnow
@@ -426,25 +427,41 @@ def analyze_execution_failure(execution_id: str) -> dict:
 
         try:
             result = request_failure_analysis(context)
-        except AnalysisUnavailableError as exc:
-            analysis.status = "Unavailable"
-            analysis.error_message = str(exc)
-        except (AnalysisProviderError, InvalidAnalysisResponse) as exc:
-            analysis.status = "Failed"
-            analysis.error_message = str(exc)
-        except Exception:
-            logger.exception("Unexpected failure-analysis error for execution %s", execution_id)
-            analysis.status = "Failed"
-            analysis.error_message = "Failure analysis failed unexpectedly."
-        else:
             analysis.status = "Completed"
-            analysis.summary = result["summary"]
-            analysis.likely_cause = result["likely_cause"]
-            analysis.suggested_remediation = result["suggested_remediation"]
-            analysis.confidence = result["confidence"]
             analysis.error_message = None
+        except (
+            AnalysisUnavailableError,
+            AnalysisProviderError,
+            InvalidAnalysisResponse,
+        ) as exc:
+            result = build_rule_based_analysis(context, str(exc))
+            analysis.status = "Completed"
+            analysis.error_message = f"Rule-based fallback used: {exc}"
+        except Exception:
+            logger.exception(
+                "Unexpected failure-analysis error for execution %s",
+                execution_id,
+            )
+            result = build_rule_based_analysis(
+                context,
+                "Unexpected analysis error.",
+            )
+            analysis.status = "Completed"
+            analysis.error_message = (
+                "Rule-based fallback used after an unexpected analysis error."
+            )
+
+        analysis.summary = result["summary"]
+        analysis.likely_cause = result["likely_cause"]
+        analysis.suggested_remediation = result["suggested_remediation"]
+        analysis.confidence = result["confidence"]
         analysis.completed_at = utcnow()
         db.commit()
-        return {"execution_id": execution_id, "analysis_status": analysis.status}
+
+        return {
+            "execution_id": execution_id,
+            "analysis_status": analysis.status,
+            "analysis_source": result.get("analysis_source", "ai"),
+        }
     finally:
         db.close()

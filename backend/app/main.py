@@ -182,6 +182,13 @@ def execution_dict(execution: Execution, include_logs: bool = False):
             {
                 "status": analysis.status,
                 "summary": analysis.summary,
+                "analysis_source": (
+                    "rule_based"
+                    if (analysis.error_message or "").startswith("Rule-based fallback used")
+                    else "ai"
+                    if analysis.status == "Completed"
+                    else None
+                ),
                 "likely_cause": analysis.likely_cause,
                 "suggested_remediation": analysis.suggested_remediation,
                 "confidence": analysis.confidence,

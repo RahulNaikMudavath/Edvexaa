@@ -150,8 +150,8 @@ FlowForge AI uses PostgreSQL with SQLAlchemy ORM. The relational model enforces 
 1. Clone the repository and enter the project directory:
 
    ```bash
-   git clone <YOUR_GITHUB_REPOSITORY_URL>
-   cd flowforge-ai-starter
+   git clone https://github.com/RahulNaikMudavath/Edvexaa.git
+   cd Edvexaa
    ```
 
 2. Create your local environment file from the example:

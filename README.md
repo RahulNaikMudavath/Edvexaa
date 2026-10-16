@@ -73,6 +73,72 @@ FastAPI Webhook Endpoint
 React Dashboard <----> FastAPI REST API
 ```
 
+## Database Schema
+
+FlowForge AI uses PostgreSQL with SQLAlchemy ORM. The relational model enforces referential integrity, idempotency, and cascading log cleanups across 6 core entities:
+
+### Tables and Relationships
+
+1. **`integrations`** — Registered API integrations and webhook target sources.
+   - `id` (VARCHAR(36), PK): UUID identifier.
+   - `name` (VARCHAR(120), NOT NULL): Human-readable name.
+   - `provider` (VARCHAR(80), DEFAULT 'simulated'): Integration provider identifier.
+   - `event_types` (JSON, DEFAULT '[]'): Supported event types array.
+   - `webhook_secret` (VARCHAR(128), NOT NULL): Secret used for HMAC-SHA256 signature verification.
+   - `is_active` (BOOLEAN, DEFAULT TRUE): Active status flag.
+   - `created_at` (TIMESTAMP WITH TIME ZONE): Registration timestamp.
+
+2. **`workflows`** — Event-driven automation rules.
+   - `id` (VARCHAR(36), PK): UUID identifier.
+   - `name` (VARCHAR(120), NOT NULL): Workflow name.
+   - `integration_id` (VARCHAR(36), FK `integrations.id`): Parent integration.
+   - `event_type` (VARCHAR(120), NOT NULL): Matching trigger event type.
+   - `actions` (JSON, DEFAULT '[]'): Array of action configs (`log`, `transform`, `notification`, `http_request`).
+   - `max_retries` (INTEGER, DEFAULT 3): Maximum retry attempts allowed.
+   - `is_active` (BOOLEAN, DEFAULT TRUE): Active workflow flag.
+   - `created_at` (TIMESTAMP WITH TIME ZONE): Creation timestamp.
+
+3. **`webhook_events`** — Ingested and persisted webhook payloads.
+   - `id` (VARCHAR(36), PK): UUID identifier.
+   - `integration_id` (VARCHAR(36), FK `integrations.id`): Destination integration.
+   - `external_event_id` (VARCHAR(200), NOT NULL): Producer's deduplication ID.
+   - `event_type` (VARCHAR(120), NOT NULL): Payload event type.
+   - `payload` (JSON, NOT NULL): Raw event payload.
+   - `received_at` (TIMESTAMP WITH TIME ZONE): Intake timestamp.
+   - *Constraint:* `uq_integration_external_event` (`integration_id`, `external_event_id`) guarantees idempotency.
+
+4. **`executions`** — Asynchronous workflow execution runs.
+   - `id` (VARCHAR(36), PK): UUID identifier.
+   - `workflow_id` (VARCHAR(36), FK `workflows.id`): Triggered workflow.
+   - `event_id` (VARCHAR(36), FK `webhook_events.id`): Triggering event.
+   - `status` (VARCHAR(20), DEFAULT 'Pending'): `Pending`, `Running`, `Completed`, or `Failed`.
+   - `attempt_count` (INTEGER, DEFAULT 0): Execution attempt counter.
+   - `started_at` (TIMESTAMP WITH TIME ZONE, NULLABLE): Run start timestamp.
+   - `completed_at` (TIMESTAMP WITH TIME ZONE, NULLABLE): Run completion timestamp.
+   - `next_attempt_at` (TIMESTAMP WITH TIME ZONE, NULLABLE): Scheduled retry time for backoff.
+   - `created_at` (TIMESTAMP WITH TIME ZONE): Creation timestamp.
+   - *Constraints:* `uq_execution_workflow_event` (`workflow_id`, `event_id`), `ck_execution_status`, `ck_execution_attempt_count`.
+
+5. **`execution_logs`** — Granular execution output and debugging trail.
+   - `id` (VARCHAR(36), PK): UUID identifier.
+   - `execution_id` (VARCHAR(36), FK `executions.id`, ON DELETE CASCADE, INDEXED).
+   - `level` (VARCHAR(20), NOT NULL): Log severity (`INFO`, `WARNING`, `ERROR`).
+   - `message` (TEXT, NOT NULL): Log message or error detail.
+   - `created_at` (TIMESTAMP WITH TIME ZONE): Emission timestamp.
+
+6. **`execution_analyses`** — AI diagnostic summaries and rule-based fallbacks.
+   - `id` (VARCHAR(36), PK): UUID identifier.
+   - `execution_id` (VARCHAR(36), FK `executions.id`, ON DELETE CASCADE, UNIQUE).
+   - `status` (VARCHAR(20), DEFAULT 'Pending'): `Pending`, `Running`, `Completed`, `Failed`, or `Unavailable`.
+   - `summary` (TEXT, NULLABLE): High-level failure summary.
+   - `likely_cause` (TEXT, NULLABLE): Root-cause diagnosis.
+   - `suggested_remediation` (TEXT, NULLABLE): Recommended troubleshooting step.
+   - `confidence` (FLOAT, NULLABLE): Confidence score between 0.0 and 1.0.
+   - `error_message` (TEXT, NULLABLE): Provider failure reason or fallback notice.
+   - `created_at` (TIMESTAMP WITH TIME ZONE): Initiation timestamp.
+   - `completed_at` (TIMESTAMP WITH TIME ZONE, NULLABLE): Completion timestamp.
+   - *Constraints:* `uq_execution_analysis_execution`, `ck_execution_analysis_status`, `ck_execution_analysis_confidence`.
+
 ## Prerequisites
 
 - Docker Desktop with Docker Compose
@@ -298,6 +364,29 @@ AI suggestions are diagnostic recommendations, not automatically applied workflo
 | `GET` | `/api/executions/{execution_id}` | Get execution details |
 
 Use the interactive Swagger interface at http://localhost:8001/docs to inspect request schemas, required fields, and response formats.
+
+## CodeZero Development Workflow
+
+In accordance with Edvexa development guidelines, [CodeZero](https://frigga.cloud/codezero) was integrated throughout the platform lifecycle:
+
+1. **Architecture Planning & Modeling:**
+   - Established non-blocking webhook ingestion decoupling FastAPI from workflow execution using Redis and Celery.
+   - Designed database idempotency guarantees using composite unique constraints (`integration_id` + `external_event_id` on events, and `workflow_id` + `event_id` on executions).
+   - Modeled independent advisory failure analysis schemas to protect execution immutability.
+
+2. **Incremental Feature Implementation:**
+   - Structured atomic commits following Conventional Commits (`feat(actions)`, `feat(analysis)`, `chore(deps)`, `docs`).
+   - Implemented 4 extensible action handlers (`log`, `transform`, `notification`, and SSRF-safe `http_request`).
+   - Built dual-mode failure diagnostics (Google Gemini LLM with automated rule-based fallback).
+
+3. **Debugging & Reliability Engineering:**
+   - Diagnosed transient worker failure cases and established bounded exponential backoff retry algorithms.
+   - Designed atomic state claiming (`update(Execution).where(status='Pending').values(status='Running')`) to eliminate worker race conditions.
+   - Formulated 21 comprehensive Pytest unit tests mocking external dependencies.
+
+4. **Validation & Quality Assurance:**
+   - Validated end-to-end integration registration and workflow creation via interactive dashboard modals.
+   - Verified production container builds for both backend and frontend environments.
 
 ## Testing
 

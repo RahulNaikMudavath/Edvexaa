@@ -6,9 +6,11 @@ import {
   ArrowUpRight,
   Boxes,
   BrainCircuit,
+  Check,
   CheckCircle2,
   CircleAlert,
   Clock3,
+  Copy,
   GitBranch,
   LoaderCircle,
   Plus,
@@ -47,11 +49,27 @@ function formatDate(value) {
   return Number.isNaN(date.getTime()) ? "—" : date.toLocaleString();
 }
 
+function formatDuration(createdAt, completedAt) {
+  if (!createdAt || !completedAt) return "—";
+  const start = new Date(createdAt).getTime();
+  const end = new Date(completedAt).getTime();
+  if (Number.isNaN(start) || Number.isNaN(end) || end < start) return "—";
+  const diffMs = end - start;
+  if (diffMs < 1000) return `${diffMs}ms`;
+  const diffSec = (diffMs / 1000).toFixed(1);
+  if (diffSec < 60) return `${diffSec}s`;
+  const mins = Math.floor(diffSec / 60);
+  const remSec = (diffSec % 60).toFixed(0);
+  return `${mins}m ${remSec}s`;
+}
+
 export default function App() {
   const [page, setPage] = useState("overview");
   const [integrations, setIntegrations] = useState([]);
   const [selectedIntegration, setSelectedIntegration] = useState(null);
+  const [showIntegrationModal, setShowIntegrationModal] = useState(false);
   const [workflows, setWorkflows] = useState([]);
+  const [showWorkflowModal, setShowWorkflowModal] = useState(false);
   const [events, setEvents] = useState([]);
   const [health, setHealth] = useState("Checking");
   const [loading, setLoading] = useState(true);
@@ -68,16 +86,20 @@ export default function App() {
     setLoading(true);
     setError("");
     try {
-      const [healthData, integrationData, workflowData, eventData] = await Promise.all([
+      const [healthData, integrationData, workflowData, eventData, executionData] = await Promise.all([
         getJson("/health"),
         getJson("/api/integrations"),
         getJson("/api/workflows"),
         getJson("/api/events"),
+        getJson("/api/executions?limit=200").catch(() => []),
       ]);
       setHealth(healthData.status);
       setIntegrations(integrationData);
       setWorkflows(workflowData);
       setEvents(eventData);
+      if (Array.isArray(executionData)) {
+        setExecutions(executionData);
+      }
     } catch (err) {
       setError(`${err.message}. Is Docker Compose running?`);
       setHealth("Unavailable");
@@ -185,9 +207,26 @@ export default function App() {
     }
   }
 
+  const completedCount = executions.filter((e) => e.status === "Completed").length;
+  const failedCount = executions.filter((e) => e.status === "Failed").length;
+
   const stats = [
     { label: "Integrations", value: integrations.length, icon: Boxes, note: "Registered sources" },
     { label: "Workflows", value: workflows.length, icon: GitBranch, note: "Configured automations" },
+    {
+      label: "Successful runs",
+      value: completedCount,
+      icon: CheckCircle2,
+      note: "Completed executions",
+      highlight: "text-emerald-400",
+    },
+    {
+      label: "Failed runs",
+      value: failedCount,
+      icon: AlertTriangle,
+      note: "Executions needing review",
+      highlight: failedCount > 0 ? "text-rose-400" : "text-slate-100",
+    },
     { label: "Events received", value: events.length, icon: Webhook, note: "Recent persisted events" },
     {
       label: "API status",
@@ -240,7 +279,7 @@ export default function App() {
               />
             </button>
             {page === "overview" && (
-              <button className="primary-button" onClick={createDemoIntegration}>
+              <button className="primary-button" onClick={() => setShowIntegrationModal(true)}>
                 <Plus size={16} /> New integration
               </button>
             )}
@@ -271,14 +310,16 @@ export default function App() {
               </div>
             )}
 
-            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-              {stats.map(({ label, value, icon: Icon, note }) => (
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+              {stats.map(({ label, value, icon: Icon, note, highlight }) => (
                 <div className="panel p-5" key={label}>
                   <div className="flex items-center justify-between">
                     <span className="text-sm text-slate-400">{label}</span>
                     <Icon size={18} className="text-violet-300" />
                   </div>
-                  <div className="mt-4 text-3xl font-semibold">{loading ? "—" : value}</div>
+                  <div className={`mt-4 text-3xl font-semibold ${highlight || ""}`}>
+                    {loading ? "—" : value}
+                  </div>
                   <div className="mt-2 text-xs text-slate-500">{note}</div>
                 </div>
               ))}
@@ -293,7 +334,7 @@ export default function App() {
                   </div>
                   <button
                     className="text-sm text-violet-300 hover:text-violet-200"
-                    onClick={createDemoIntegration}
+                    onClick={() => setShowIntegrationModal(true)}
                   >
                     Add integration <ArrowUpRight size={14} className="inline" />
                   </button>
@@ -345,9 +386,17 @@ export default function App() {
               </section>
 
               <section className="panel overflow-hidden">
-                <div className="border-b border-white/10 p-5">
-                  <h2 className="font-semibold">Workflow configurations</h2>
-                  <p className="mt-1 text-xs text-slate-500">Rules waiting for matching events</p>
+                <div className="flex items-center justify-between border-b border-white/10 p-5">
+                  <div>
+                    <h2 className="font-semibold">Workflow configurations</h2>
+                    <p className="mt-1 text-xs text-slate-500">Rules waiting for matching events</p>
+                  </div>
+                  <button
+                    className="flex items-center gap-1.5 rounded-lg border border-violet-400/30 bg-violet-500/10 px-3 py-1.5 text-xs font-medium text-violet-200 hover:bg-violet-500/20"
+                    onClick={() => setShowWorkflowModal(true)}
+                  >
+                    <Plus size={14} /> New workflow
+                  </button>
                 </div>
                 {workflows.length === 0 ? (
                   <Empty
@@ -529,6 +578,581 @@ export default function App() {
           </section>
         </div>
       )}
+
+      <RegisterIntegrationModal
+        isOpen={showIntegrationModal}
+        onClose={() => setShowIntegrationModal(false)}
+        onCreated={refreshOverview}
+      />
+
+      <NewWorkflowModal
+        isOpen={showWorkflowModal}
+        onClose={() => setShowWorkflowModal(false)}
+        integrations={integrations}
+        onCreated={refreshOverview}
+      />
+    </div>
+  );
+}
+
+function RegisterIntegrationModal({ isOpen, onClose, onCreated }) {
+  const [name, setName] = useState("");
+  const [provider, setProvider] = useState("simulated");
+  const [eventTypesInput, setEventTypesInput] = useState("order.created, ticket.opened");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const [createdIntegration, setCreatedIntegration] = useState(null);
+  const [copied, setCopied] = useState(false);
+
+  if (!isOpen) return null;
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    if (!name.trim()) {
+      setError("Integration name is required");
+      return;
+    }
+    const eventTypes = eventTypesInput
+      .split(",")
+      .map((t) => t.trim())
+      .filter(Boolean);
+
+    setSubmitting(true);
+    setError("");
+    try {
+      const response = await fetch("/api/integrations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: name.trim(),
+          provider: provider.trim() || "simulated",
+          event_types: eventTypes,
+        }),
+      });
+      if (!response.ok) {
+        let message = `Failed to create integration (${response.status})`;
+        try {
+          message = (await response.json()).detail || message;
+        } catch {}
+        throw new Error(message);
+      }
+      const data = await response.json();
+      setCreatedIntegration(data);
+      onCreated();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  function handleClose() {
+    setName("");
+    setProvider("simulated");
+    setEventTypesInput("order.created, ticket.opened");
+    setError("");
+    setCreatedIntegration(null);
+    setCopied(false);
+    onClose();
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+      onMouseDown={(e) => e.target === e.currentTarget && handleClose()}
+    >
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="reg-modal-title"
+        className="w-full max-w-lg rounded-2xl border border-white/10 bg-[#0c1222] p-6 shadow-2xl"
+      >
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-xs uppercase tracking-widest text-violet-300">
+              Integration Management
+            </p>
+            <h2 id="reg-modal-title" className="mt-1 text-xl font-semibold">
+              {createdIntegration ? "Integration Created" : "Register API Integration"}
+            </h2>
+          </div>
+          <button
+            type="button"
+            onClick={handleClose}
+            className="rounded-lg border border-white/10 px-3 py-1.5 text-xs text-slate-300 hover:bg-white/5"
+          >
+            Close
+          </button>
+        </div>
+
+        {error && (
+          <div className="mt-4 flex items-start gap-2 rounded-lg border border-rose-400/20 bg-rose-400/10 p-3 text-xs text-rose-200">
+            <CircleAlert size={16} className="shrink-0" />
+            <span>{error}</span>
+          </div>
+        )}
+
+        {createdIntegration ? (
+          <div className="mt-6 space-y-4">
+            <div className="rounded-lg border border-emerald-400/20 bg-emerald-400/10 p-3 text-xs text-emerald-200">
+              Successfully registered <strong>{createdIntegration.name}</strong>! Save the signing secret below.
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div>
+                <span className="text-slate-400">Integration ID:</span>
+                <p className="mt-1 font-mono text-slate-200">{createdIntegration.id}</p>
+              </div>
+
+              <div>
+                <span className="text-slate-400">Webhook URL:</span>
+                <p className="mt-1 break-all rounded bg-white/[0.04] p-2 font-mono text-violet-300">
+                  {window.location.origin}/api/webhooks/{createdIntegration.id}
+                </p>
+              </div>
+
+              <div>
+                <span className="text-slate-400">Webhook Secret (HMAC-SHA256):</span>
+                <div className="mt-1 flex items-center gap-2">
+                  <input
+                    readOnly
+                    type="text"
+                    value={createdIntegration.webhook_secret || ""}
+                    className="w-full rounded border border-white/10 bg-white/[0.04] px-3 py-2 font-mono text-xs text-amber-200"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard.writeText(createdIntegration.webhook_secret || "");
+                      setCopied(true);
+                      setTimeout(() => setCopied(false), 2000);
+                    }}
+                    className="flex shrink-0 items-center gap-1 rounded border border-white/10 bg-white/[0.05] px-3 py-2 text-xs text-slate-200 hover:bg-white/10"
+                  >
+                    {copied ? <Check size={14} className="text-emerald-400" /> : <Copy size={14} />}
+                    {copied ? "Copied" : "Copy"}
+                  </button>
+                </div>
+                <p className="mt-1 text-[11px] text-amber-300/80">
+                  Keep this secret secure to sign payloads. It is not returned again.
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-6 flex justify-end">
+              <button
+                type="button"
+                onClick={handleClose}
+                className="primary-button"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        ) : (
+          <form onSubmit={handleSubmit} className="mt-5 space-y-4 text-xs">
+            <div>
+              <label className="block text-slate-400 font-medium">Integration Name</label>
+              <input
+                type="text"
+                required
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="e.g. Stripe Checkout, GitHub Webhooks"
+                className="mt-1.5 w-full rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:border-violet-400 focus:outline-none"
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-slate-400 font-medium">Provider</label>
+                <input
+                  type="text"
+                  value={provider}
+                  onChange={(e) => setProvider(e.target.value)}
+                  placeholder="simulated, stripe, etc."
+                  className="mt-1.5 w-full rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:border-violet-400 focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-slate-400 font-medium">Quick Preset</label>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setName("Payment Service Integration");
+                    setProvider("simulated");
+                    setEventTypesInput("payment.succeeded, refund.created");
+                  }}
+                  className="mt-1.5 w-full rounded-lg border border-violet-400/20 bg-violet-400/10 px-3 py-2 text-xs font-medium text-violet-300 hover:bg-violet-400/20"
+                >
+                  Use Demo Values
+                </button>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-slate-400 font-medium">
+                Supported Event Types (comma-separated)
+              </label>
+              <input
+                type="text"
+                value={eventTypesInput}
+                onChange={(e) => setEventTypesInput(e.target.value)}
+                placeholder="order.created, ticket.opened, user.signup"
+                className="mt-1.5 w-full rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:border-violet-400 focus:outline-none"
+              />
+              <p className="mt-1 text-[11px] text-slate-500">
+                Incoming webhook events matching these types will be permitted and processed.
+              </p>
+            </div>
+
+            <div className="mt-6 flex justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={handleClose}
+                className="rounded-lg border border-white/10 px-4 py-2 text-sm text-slate-300 hover:bg-white/5"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={submitting}
+                className="primary-button"
+              >
+                {submitting ? "Registering..." : "Register Integration"}
+              </button>
+            </div>
+          </form>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function NewWorkflowModal({ isOpen, onClose, integrations, onCreated }) {
+  const [name, setName] = useState("");
+  const [integrationId, setIntegrationId] = useState("");
+  const [eventType, setEventType] = useState("");
+  const [maxRetries, setMaxRetries] = useState(3);
+  const [actionType, setActionType] = useState("log");
+  const [logMessage, setLogMessage] = useState("Workflow executed for event");
+  const [notificationRecipient, setNotificationRecipient] = useState("ops-team@company.com");
+  const [notificationMessage, setNotificationMessage] = useState("Workflow triggered notification");
+  const [httpUrl, setHttpUrl] = useState("https://httpbin.org/post");
+  const [httpMethod, setHttpMethod] = useState("POST");
+  const [transformFields, setTransformFields] = useState('{"event_id": "event_id"}');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (integrations.length > 0 && !integrationId) {
+      setIntegrationId(integrations[0].id);
+      if (integrations[0].event_types?.length > 0) {
+        setEventType(integrations[0].event_types[0]);
+      }
+    }
+  }, [integrations, integrationId]);
+
+  if (!isOpen) return null;
+
+  const selectedInt = integrations.find((i) => i.id === integrationId);
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    if (!name.trim()) {
+      setError("Workflow name is required");
+      return;
+    }
+    if (!integrationId) {
+      setError("Please select an integration");
+      return;
+    }
+    if (!eventType.trim()) {
+      setError("Trigger event type is required");
+      return;
+    }
+
+    let actionConfig = {};
+    if (actionType === "log") {
+      actionConfig = { message: logMessage.trim() || "Log action executed" };
+    } else if (actionType === "notification") {
+      actionConfig = {
+        recipient: notificationRecipient.trim() || "demo",
+        message: notificationMessage.trim() || "Notification sent",
+      };
+    } else if (actionType === "http_request") {
+      actionConfig = {
+        url: httpUrl.trim(),
+        method: httpMethod,
+      };
+    } else if (actionType === "transform") {
+      try {
+        actionConfig = { fields: JSON.parse(transformFields) };
+      } catch {
+        setError("Transform fields must be valid JSON object, e.g. {\"target\": \"source\"}");
+        return;
+      }
+    }
+
+    setSubmitting(true);
+    setError("");
+    try {
+      const response = await fetch("/api/workflows", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: name.trim(),
+          integration_id: integrationId,
+          event_type: eventType.trim(),
+          max_retries: Number(maxRetries),
+          actions: [{ type: actionType, config: actionConfig }],
+        }),
+      });
+      if (!response.ok) {
+        let message = `Failed to create workflow (${response.status})`;
+        try {
+          message = (await response.json()).detail || message;
+        } catch {}
+        throw new Error(message);
+      }
+      onCreated();
+      handleClose();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  function handleClose() {
+    setName("");
+    setError("");
+    onClose();
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+      onMouseDown={(e) => e.target === e.currentTarget && handleClose()}
+    >
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="wf-modal-title"
+        className="w-full max-w-lg rounded-2xl border border-white/10 bg-[#0c1222] p-6 shadow-2xl max-h-[90vh] overflow-y-auto"
+      >
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <p className="text-xs uppercase tracking-widest text-violet-300">
+              Workflow Builder
+            </p>
+            <h2 id="wf-modal-title" className="mt-1 text-xl font-semibold">
+              Create Automation Workflow
+            </h2>
+          </div>
+          <button
+            type="button"
+            onClick={handleClose}
+            className="rounded-lg border border-white/10 px-3 py-1.5 text-xs text-slate-300 hover:bg-white/5"
+          >
+            Close
+          </button>
+        </div>
+
+        {error && (
+          <div className="mt-4 flex items-start gap-2 rounded-lg border border-rose-400/20 bg-rose-400/10 p-3 text-xs text-rose-200">
+            <CircleAlert size={16} className="shrink-0" />
+            <span>{error}</span>
+          </div>
+        )}
+
+        <form onSubmit={handleSubmit} className="mt-5 space-y-4 text-xs">
+          <div>
+            <label className="block text-slate-400 font-medium">Workflow Name</label>
+            <input
+              type="text"
+              required
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="e.g. Notify On Order Created"
+              className="mt-1.5 w-full rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:border-violet-400 focus:outline-none"
+            />
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-slate-400 font-medium">Target Integration</label>
+              <select
+                value={integrationId}
+                onChange={(e) => {
+                  setIntegrationId(e.target.value);
+                  const intg = integrations.find((i) => i.id === e.target.value);
+                  if (intg?.event_types?.length) {
+                    setEventType(intg.event_types[0]);
+                  }
+                }}
+                className="mt-1.5 w-full rounded-lg border border-white/10 bg-[#0f172a] px-3 py-2 text-sm text-slate-100 focus:border-violet-400 focus:outline-none"
+              >
+                {integrations.map((i) => (
+                  <option key={i.id} value={i.id}>
+                    {i.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-slate-400 font-medium">Trigger Event Type</label>
+              {selectedInt?.event_types?.length ? (
+                <select
+                  value={eventType}
+                  onChange={(e) => setEventType(e.target.value)}
+                  className="mt-1.5 w-full rounded-lg border border-white/10 bg-[#0f172a] px-3 py-2 text-sm text-slate-100 focus:border-violet-400 focus:outline-none"
+                >
+                  {selectedInt.event_types.map((type) => (
+                    <option key={type} value={type}>
+                      {type}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  required
+                  value={eventType}
+                  onChange={(e) => setEventType(e.target.value)}
+                  placeholder="e.g. order.created"
+                  className="mt-1.5 w-full rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-slate-100 focus:border-violet-400 focus:outline-none"
+                />
+              )}
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-slate-400 font-medium">Max Retries (on transient failure)</label>
+            <input
+              type="number"
+              min="0"
+              max="10"
+              value={maxRetries}
+              onChange={(e) => setMaxRetries(e.target.value)}
+              className="mt-1.5 w-full rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-slate-100 focus:border-violet-400 focus:outline-none"
+            />
+          </div>
+
+          <div className="rounded-xl border border-white/10 bg-white/[0.02] p-4 space-y-3">
+            <div>
+              <label className="block text-slate-300 font-medium text-xs">Configured Action</label>
+              <select
+                value={actionType}
+                onChange={(e) => setActionType(e.target.value)}
+                className="mt-1.5 w-full rounded-lg border border-white/10 bg-[#0f172a] px-3 py-2 text-sm text-slate-100 focus:border-violet-400 focus:outline-none"
+              >
+                <option value="log">Log Message (Internal Logging)</option>
+                <option value="notification">Notification (Simulated Alert)</option>
+                <option value="http_request">HTTP Request (Outbound Webhook)</option>
+                <option value="transform">Transform Data (Payload Mapping)</option>
+              </select>
+            </div>
+
+            {actionType === "log" && (
+              <div>
+                <label className="block text-slate-400">Log Message</label>
+                <input
+                  type="text"
+                  value={logMessage}
+                  onChange={(e) => setLogMessage(e.target.value)}
+                  className="mt-1 w-full rounded border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs text-slate-200"
+                />
+              </div>
+            )}
+
+            {actionType === "notification" && (
+              <div className="space-y-2">
+                <div>
+                  <label className="block text-slate-400">Recipient</label>
+                  <input
+                    type="text"
+                    value={notificationRecipient}
+                    onChange={(e) => setNotificationRecipient(e.target.value)}
+                    className="mt-1 w-full rounded border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs text-slate-200"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400">Message Content</label>
+                  <input
+                    type="text"
+                    value={notificationMessage}
+                    onChange={(e) => setNotificationMessage(e.target.value)}
+                    className="mt-1 w-full rounded border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs text-slate-200"
+                  />
+                </div>
+              </div>
+            )}
+
+            {actionType === "http_request" && (
+              <div className="space-y-2">
+                <div>
+                  <label className="block text-slate-400">Target Endpoint URL</label>
+                  <input
+                    type="url"
+                    value={httpUrl}
+                    onChange={(e) => setHttpUrl(e.target.value)}
+                    placeholder="https://example.com/api/callback"
+                    className="mt-1 w-full rounded border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs text-slate-200"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400">HTTP Method</label>
+                  <select
+                    value={httpMethod}
+                    onChange={(e) => setHttpMethod(e.target.value)}
+                    className="mt-1 w-full rounded border border-white/10 bg-[#0f172a] px-3 py-1.5 text-xs text-slate-200"
+                  >
+                    <option value="POST">POST</option>
+                    <option value="GET">GET</option>
+                    <option value="PUT">PUT</option>
+                    <option value="PATCH">PATCH</option>
+                  </select>
+                </div>
+              </div>
+            )}
+
+            {actionType === "transform" && (
+              <div>
+                <label className="block text-slate-400">Fields Mapping JSON</label>
+                <textarea
+                  rows={3}
+                  value={transformFields}
+                  onChange={(e) => setTransformFields(e.target.value)}
+                  className="mt-1 w-full font-mono rounded border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs text-slate-200"
+                />
+                <p className="mt-1 text-[11px] text-slate-500">
+                  Maps target keys to dot-notation paths in the payload (e.g. &#123;&quot;order_id&quot;: &quot;data.id&quot;&#125;).
+                </p>
+              </div>
+            )}
+          </div>
+
+          <div className="mt-6 flex justify-end gap-3 pt-2">
+            <button
+              type="button"
+              onClick={handleClose}
+              className="rounded-lg border border-white/10 px-4 py-2 text-sm text-slate-300 hover:bg-white/5"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={submitting}
+              className="primary-button"
+            >
+              {submitting ? "Creating..." : "Create Workflow"}
+            </button>
+          </div>
+        </form>
+      </section>
     </div>
   );
 }
@@ -593,6 +1217,32 @@ function ExecutionHistory({
         <p className="text-sm text-slate-400">
           Recent asynchronous workflow runs, with their status and action logs.
         </p>
+      </div>
+
+      {/* Execution status summary cards */}
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+        <div className="rounded-xl border border-white/10 bg-white/[0.02] p-4">
+          <p className="text-xs font-medium text-slate-400">Total Runs</p>
+          <p className="mt-1 text-2xl font-semibold text-slate-100">{executions.length}</p>
+        </div>
+        <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/[0.05] p-4">
+          <p className="text-xs font-medium text-emerald-300">Successful</p>
+          <p className="mt-1 text-2xl font-semibold text-emerald-400">
+            {executions.filter((e) => e.status === "Completed").length}
+          </p>
+        </div>
+        <div className="rounded-xl border border-rose-500/20 bg-rose-500/[0.05] p-4">
+          <p className="text-xs font-medium text-rose-300">Failed</p>
+          <p className="mt-1 text-2xl font-semibold text-rose-400">
+            {executions.filter((e) => e.status === "Failed").length}
+          </p>
+        </div>
+        <div className="rounded-xl border border-sky-500/20 bg-sky-500/[0.05] p-4">
+          <p className="text-xs font-medium text-sky-300">In Progress</p>
+          <p className="mt-1 text-2xl font-semibold text-sky-400">
+            {executions.filter((e) => ["Pending", "Running"].includes(e.status)).length}
+          </p>
+        </div>
       </div>
 
       {error && (
@@ -661,14 +1311,14 @@ function ExecutionHistory({
                       <dd className="mt-1 truncate font-mono text-slate-300">{execution.id}</dd>
                     </div>
                     <div>
-                      <dt className="text-slate-500">Created</dt>
-                      <dd className="mt-1 text-slate-300">{formatDate(execution.created_at)}</dd>
+                      <dt className="text-slate-500">Duration</dt>
+                      <dd className="mt-1 font-mono text-slate-300">
+                        {formatDuration(execution.created_at, execution.completed_at)}
+                      </dd>
                     </div>
                     <div>
-                      <dt className="text-slate-500">Completed</dt>
-                      <dd className="mt-1 text-slate-300">
-                        {formatDate(execution.completed_at)}
-                      </dd>
+                      <dt className="text-slate-500">Created</dt>
+                      <dd className="mt-1 text-slate-300">{formatDate(execution.created_at)}</dd>
                     </div>
                     <div>
                       <dt className="text-slate-500">Attempts</dt>
@@ -745,6 +1395,14 @@ function ExecutionDetails({ detail, loading, error, selectedId, onRetry }) {
             <DetailValue
               label="Completed"
               value={formatDate(detail.completed_at)}
+            />
+            <DetailValue
+              label="Duration"
+              value={formatDuration(detail.created_at, detail.completed_at)}
+            />
+            <DetailValue
+              label="Total attempts"
+              value={`${detail.attempt_count} of ${detail.max_retries + 1}`}
             />
           </div>
 

@@ -15,12 +15,17 @@ class IntegrationOut(BaseModel):
     event_types: list[str]
     is_active: bool
     created_at: str | None = None
+    
     webhook_secret: str | None = None
 
 
+
 class ActionConfig(BaseModel):
-    type: str = Field(description="For this milestone, use log or transform")
+    type: str = Field(
+    description="Supported actions: log, transform, notification, http_request"
+)
     config: dict = Field(default_factory=dict)
+
 
 
 class WorkflowCreate(BaseModel):

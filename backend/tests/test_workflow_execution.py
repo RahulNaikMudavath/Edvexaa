@@ -163,12 +163,16 @@ def test_retryable_failure_retries_then_completes(session_factory, monkeypatch):
     original_execute_action = tasks.execute_action
     calls = 0
 
-    def fail_once(action):
+    
+    def fail_once(action, event_payload=None):
         nonlocal calls
         calls += 1
+
         if calls == 1:
             raise tasks.RetryableExecutionError("temporary failure")
-        return original_execute_action(action)
+
+        return original_execute_action(action, event_payload)
+
 
     monkeypatch.setattr(tasks, "execute_action", fail_once)
     monkeypatch.setattr(tasks, "retry_backoff_seconds", lambda retry_number: 0)
@@ -253,6 +257,65 @@ def test_duplicate_webhook_creates_one_execution_and_worker_claim_is_idempotent(
         execution = db.get(Execution, execution_id)
         assert execution.attempt_count == 1
         assert db.scalar(select(func.count(ExecutionLog.id))) == 3
+
+
+def test_webhook_rejects_missing_signature(client, session_factory):
+    with session_factory() as db:
+        db.add(
+            Integration(
+                id="integration-1",
+                name="Test integration",
+                webhook_secret="test-secret",
+                event_types=["order.created"],
+            )
+        )
+        db.commit()
+
+    response = client.post(
+        "/api/webhooks/integration-1",
+        json={
+            "event_id": "external-missing-signature",
+            "event_type": "order.created",
+        },
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid webhook signature"
+    assert client.queued_executions == []
+
+
+def test_webhook_rejects_invalid_signature(client, session_factory):
+    with session_factory() as db:
+        db.add(
+            Integration(
+                id="integration-1",
+                name="Test integration",
+                webhook_secret="test-secret",
+                event_types=["order.created"],
+            )
+        )
+        db.commit()
+
+    body = json.dumps(
+        {
+            "event_id": "external-invalid-signature",
+            "event_type": "order.created",
+        },
+        separators=(",", ":"),
+    ).encode()
+
+    response = client.post(
+        "/api/webhooks/integration-1",
+        content=body,
+        headers={
+            "Content-Type": "application/json",
+            "X-FlowForge-Signature": "sha256=invalid-signature",
+        },
+    )
+
+    assert response.status_code == 401
+    assert client.queued_executions == []
+
 
 
 def test_execution_api_lists_detail_and_logs(session_factory, client):
@@ -466,3 +529,117 @@ def test_provider_http_call_is_mocked_and_uses_bounded_timeout(monkeypatch):
     assert calls[0][1]["headers"]["x-goog-api-key"] == "test-only-key"
     assert calls[0][1]["timeout"].read == 30
     assert calls[0][1]["json"]["contents"][0]["parts"][0]["text"]
+
+
+def test_http_request_success(monkeypatch):
+    class FakeResponse:
+        status_code = 200
+
+        @property
+        def is_error(self):
+            return False
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            assert kwargs["timeout"] == 10.0
+            assert kwargs["follow_redirects"] is False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def request(self, method, url, headers, json):
+            assert method == "POST"
+            assert url == "https://example.com/api"
+            assert json == {"event_id": "test-1"}
+            return FakeResponse()
+
+    monkeypatch.setattr(tasks.httpx, "Client", FakeClient)
+
+    result = tasks.execute_action(
+        {
+            "type": "http_request",
+            "config": {
+                "url": "https://example.com/api",
+                "method": "POST",
+            },
+        },
+        {"event_id": "test-1"},
+    )
+
+    assert "succeeded" in result
+    assert "200" in result
+
+
+def test_http_request_server_error_is_retryable(monkeypatch):
+    class FakeResponse:
+        status_code = 500
+        is_error = True
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def request(self, *args, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(tasks.httpx, "Client", FakeClient)
+
+    with pytest.raises(tasks.RetryableExecutionError):
+        tasks.execute_action(
+            {
+                "type": "http_request",
+                "config": {"url": "https://example.com/api"},
+            },
+            {},
+        )
+
+
+def test_http_request_client_error_is_permanent(monkeypatch):
+    class FakeResponse:
+        status_code = 400
+        is_error = True
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def request(self, *args, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(tasks.httpx, "Client", FakeClient)
+
+    with pytest.raises(tasks.PermanentExecutionError):
+        tasks.execute_action(
+            {
+                "type": "http_request",
+                "config": {"url": "https://example.com/api"},
+            },
+            {},
+        )
+
+
+def test_http_request_rejects_invalid_url():
+    with pytest.raises(tasks.PermanentExecutionError):
+        tasks.execute_action(
+            {
+                "type": "http_request",
+                "config": {"url": "file:///etc/passwd"},
+            },
+            {},
+        )
+

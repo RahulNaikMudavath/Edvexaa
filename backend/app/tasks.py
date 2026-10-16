@@ -1,6 +1,9 @@
+import json
 import logging
 from datetime import timedelta
+from urllib.parse import urlparse
 
+import httpx
 from celery import Task
 from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
@@ -37,7 +40,9 @@ def schedule_failure_analysis(execution_id: str) -> None:
             return
 
         analysis = db.scalar(
-            select(ExecutionAnalysis).where(ExecutionAnalysis.execution_id == execution_id)
+            select(ExecutionAnalysis).where(
+                ExecutionAnalysis.execution_id == execution_id
+            )
         )
         if analysis is None:
             analysis = ExecutionAnalysis(execution_id=execution_id, status="Pending")
@@ -48,13 +53,21 @@ def schedule_failure_analysis(execution_id: str) -> None:
 
         if analysis.status != "Pending":
             return
-        analyze_execution_failure.apply_async(args=[execution_id], task_id=f"analysis-{execution_id}")
+        analyze_execution_failure.apply_async(
+            args=[execution_id],
+            task_id=f"analysis-{execution_id}",
+        )
     except Exception:
         db.rollback()
-        logger.exception("Could not schedule failure analysis for execution %s", execution_id)
+        logger.exception(
+            "Could not schedule failure analysis for execution %s",
+            execution_id,
+        )
         try:
             analysis = db.scalar(
-                select(ExecutionAnalysis).where(ExecutionAnalysis.execution_id == execution_id)
+                select(ExecutionAnalysis).where(
+                    ExecutionAnalysis.execution_id == execution_id
+                )
             )
             if analysis is not None and analysis.status == "Pending":
                 analysis.status = "Failed"
@@ -63,7 +76,10 @@ def schedule_failure_analysis(execution_id: str) -> None:
                 db.commit()
         except Exception:
             db.rollback()
-            logger.exception("Could not persist analysis queue failure for execution %s", execution_id)
+            logger.exception(
+                "Could not persist analysis queue failure for execution %s",
+                execution_id,
+            )
     finally:
         db.close()
 
@@ -72,20 +88,162 @@ def retry_backoff_seconds(retry_number: int) -> int:
     return min(2 ** (retry_number + 1), MAX_BACKOFF_SECONDS)
 
 
-def execute_action(action: dict) -> str:
+def execute_action(
+    action: dict,
+    event_payload: dict | None = None,
+) -> str:
     action_type = action.get("type")
-    if action_type != "log":
-        raise PermanentExecutionError(f"Unsupported workflow action: {action_type}")
-
     config = action.get("config") or {}
-    message = config.get("message", "Log action executed")
-    if not isinstance(message, str):
-        raise PermanentExecutionError("The log action message must be a string")
-    logger.info("Workflow action: %s", message)
-    return message
+
+    if not isinstance(config, dict):
+        raise PermanentExecutionError("Action config must be an object")
+
+    if action_type == "log":
+        message = config.get("message", "Log action executed")
+        if not isinstance(message, str):
+            raise PermanentExecutionError(
+                "The log action message must be a string"
+            )
+        logger.info("Workflow action: %s", message)
+        return message
+
+    if action_type == "transform":
+        payload = event_payload or {}
+        fields = config.get("fields", {})
+
+        if not isinstance(fields, dict):
+            raise PermanentExecutionError(
+                "Transform config 'fields' must be an object"
+            )
+
+        transformed = {}
+        for target, source in fields.items():
+            if not isinstance(target, str) or not isinstance(source, str):
+                raise PermanentExecutionError(
+                    "Transform field names and source paths must be strings"
+                )
+
+            value = payload
+            for part in source.split("."):
+                if not isinstance(value, dict) or part not in value:
+                    value = None
+                    break
+                value = value[part]
+
+            transformed[target] = value
+
+        return "Transform completed: " + json.dumps(
+            transformed, ensure_ascii=True, default=str
+        )
+
+    if action_type == "notification":
+        message = config.get("message")
+        recipient = config.get("recipient", "demo")
+
+        if not isinstance(message, str) or not message.strip():
+            raise PermanentExecutionError(
+                "Notification config requires a non-empty message"
+            )
+
+        if not isinstance(recipient, str) or not recipient.strip():
+            raise PermanentExecutionError(
+                "Notification recipient must be a non-empty string"
+            )
+
+        logger.info(
+            "Simulated notification to %s",
+            recipient,
+        )
+        return "Simulated notification: " + message
+
+    if action_type == "http_request":
+        url = config.get("url")
+        method = config.get("method", "POST")
+        headers = config.get("headers", {})
+        body = config.get("body", event_payload or {})
+
+        if not isinstance(url, str):
+            raise PermanentExecutionError(
+                "HTTP action requires a URL"
+            )
+
+        parsed = urlparse(url)
+        if (
+            parsed.scheme not in ("http", "https")
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+        ):
+            raise PermanentExecutionError(
+                "HTTP action URL must be a valid HTTP(S) URL"
+            )
+
+        if not isinstance(method, str) or method.upper() not in {
+            "GET",
+            "POST",
+            "PUT",
+            "PATCH",
+            "DELETE",
+        }:
+            raise PermanentExecutionError(
+                "Unsupported HTTP method"
+            )
+
+        if not isinstance(headers, dict) or not all(
+            isinstance(k, str) and isinstance(v, str)
+            for k, v in headers.items()
+        ):
+            raise PermanentExecutionError(
+                "HTTP headers must be a string-to-string object"
+            )
+
+        try:
+            with httpx.Client(
+                timeout=10.0,
+                follow_redirects=False,
+                trust_env=False,
+            ) as client:
+                response = client.request(
+                    method.upper(),
+                    url,
+                    headers=headers,
+                    json=body,
+                )
+
+            if response.status_code == 429 or response.status_code >= 500:
+                raise RetryableExecutionError(
+                    f"HTTP request returned status {response.status_code}"
+                )
+
+            if response.is_error:
+                raise PermanentExecutionError(
+                    f"HTTP request returned status {response.status_code}"
+                )
+
+            return (
+                f"HTTP {method.upper()} succeeded "
+                f"with status {response.status_code}"
+            )
+
+        except httpx.TimeoutException as exc:
+            raise RetryableExecutionError(
+                "HTTP request timed out"
+            ) from exc
+        except httpx.RequestError as exc:
+            raise RetryableExecutionError(
+                f"HTTP request failed: {type(exc).__name__}"
+            ) from exc
+
+    raise PermanentExecutionError(
+        f"Unsupported workflow action: {action_type}"
+    )
 
 
-@celery_app.task(bind=True, name="flowforge.execute_workflow", max_retries=MAX_WORKFLOW_RETRIES)
+@celery_app.task(
+    bind=True,
+    name="flowforge.execute_workflow",
+    max_retries=MAX_WORKFLOW_RETRIES,
+)
 def execute_workflow(self: Task, execution_id: str) -> dict:
     db = SessionLocal()
     try:
@@ -95,7 +253,10 @@ def execute_workflow(self: Task, execution_id: str) -> dict:
             .where(
                 Execution.id == execution_id,
                 Execution.status == "Pending",
-                or_(Execution.next_attempt_at.is_(None), Execution.next_attempt_at <= now),
+                or_(
+                    Execution.next_attempt_at.is_(None),
+                    Execution.next_attempt_at <= now,
+                ),
             )
             .values(
                 status="Running",
@@ -114,7 +275,10 @@ def execute_workflow(self: Task, execution_id: str) -> dict:
             return {"execution_id": execution_id, "status": "Skipped"}
         actions = execution.workflow.actions
         retry_number = self.request.retries
-        max_retries = max(0, min(execution.workflow.max_retries, MAX_WORKFLOW_RETRIES))
+        max_retries = max(
+            0,
+            min(execution.workflow.max_retries, MAX_WORKFLOW_RETRIES),
+        )
         db.add(
             ExecutionLog(
                 execution_id=execution_id,
@@ -126,15 +290,23 @@ def execute_workflow(self: Task, execution_id: str) -> dict:
 
         try:
             for action in actions:
-                message = execute_action(action)
-                db.add(ExecutionLog(execution_id=execution_id, level="INFO", message=message))
+                message = execute_action(action, execution.event.payload)
+                db.add(
+                    ExecutionLog(
+                        execution_id=execution_id,
+                        level="INFO",
+                        message=message,
+                    )
+                )
                 db.commit()
         except Exception as exc:
             is_permanent = isinstance(exc, PermanentExecutionError)
             will_retry = not is_permanent and retry_number < max_retries
             countdown = retry_backoff_seconds(retry_number)
             execution.status = "Pending" if will_retry else "Failed"
-            execution.next_attempt_at = utcnow() + timedelta(seconds=countdown) if will_retry else None
+            execution.next_attempt_at = (
+                utcnow() + timedelta(seconds=countdown) if will_retry else None
+            )
             execution.completed_at = None if will_retry else utcnow()
             db.add(
                 ExecutionLog(
@@ -156,7 +328,13 @@ def execute_workflow(self: Task, execution_id: str) -> dict:
         execution.status = "Completed"
         execution.completed_at = utcnow()
         execution.next_attempt_at = None
-        db.add(ExecutionLog(execution_id=execution_id, level="INFO", message="Execution completed"))
+        db.add(
+            ExecutionLog(
+                execution_id=execution_id,
+                level="INFO",
+                message="Execution completed",
+            )
+        )
         db.commit()
         return {"execution_id": execution_id, "status": "Completed"}
     finally:
@@ -172,7 +350,9 @@ def analyze_execution_failure(execution_id: str) -> dict:
             return {"execution_id": execution_id, "analysis_status": "Skipped"}
 
         analysis = db.scalar(
-            select(ExecutionAnalysis).where(ExecutionAnalysis.execution_id == execution_id)
+            select(ExecutionAnalysis).where(
+                ExecutionAnalysis.execution_id == execution_id
+            )
         )
         if analysis is None:
             try:
@@ -198,7 +378,9 @@ def analyze_execution_failure(execution_id: str) -> dict:
             return {"execution_id": execution_id, "analysis_status": "Skipped"}
 
         analysis = db.scalar(
-            select(ExecutionAnalysis).where(ExecutionAnalysis.execution_id == execution_id)
+            select(ExecutionAnalysis).where(
+                ExecutionAnalysis.execution_id == execution_id
+            )
         )
         if analysis is None or execution is None or execution.status != "Failed":
             if analysis is not None:
@@ -233,7 +415,11 @@ def analyze_execution_failure(execution_id: str) -> dict:
                 "Workflow execution failed.",
             ),
             "logs": [
-                {"level": entry.level, "message": entry.message, "created_at": entry.created_at.isoformat()}
+                {
+                    "level": entry.level,
+                    "message": entry.message,
+                    "created_at": entry.created_at.isoformat(),
+                }
                 for entry in execution.logs
             ],
         }
